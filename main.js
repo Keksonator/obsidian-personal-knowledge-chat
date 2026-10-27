@@ -1,7 +1,28 @@
-const { Plugin, ItemView, PluginSettingTab, Setting, Modal, Notice, setIcon } = require('obsidian');
+const { Plugin, ItemView, PluginSettingTab, Setting, Modal, Notice, TFolder, setIcon } = require('obsidian');
 const path = require('node:path');
 const VIEW = 'personal-knowledge-chat';
-const DEFAULTS = { provider: 'local', localUrl: 'http://127.0.0.1:11434', codexPath: '', models: { local: '', chatgpt: '' } };
+const DEFAULTS = { provider: 'local', localUrl: 'http://127.0.0.1:11434', codexPath: '', templateFolder: 'Шаблоны', models: { local: '', chatgpt: '' } };
+const TEMPLATE_PROMPT = 'Создай шаблон заметки Obsidian по следующему описанию. Верни только готовый Markdown, без пояснений и ограждающих блоков кода. Начни с заголовка первого уровня. Используй уместные поля и заполнители в двойных фигурных скобках. Описание: ';
+
+function templateContent(text) {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```$/i);
+  return (fenced ? fenced[1] : trimmed).trim();
+}
+
+function templateTitle(content) {
+  const heading = content.match(/^#\s+(.+)$/m)?.[1] || 'Новый шаблон';
+  return heading.replace(/[<>:"/\\|?*\x00-\x1f]/g, '').replace(/[. ]+$/g, '').slice(0, 80).trim() || 'Новый шаблон';
+}
+
+function templatePath(folder, name) {
+  if (typeof folder !== 'string' || typeof name !== 'string') throw new Error('Укажите папку и название шаблона.');
+  const parts = folder.trim().split(/[\\/]/);
+  const base = name.trim().replace(/\.md$/i, '');
+  const valid = part => part && part !== '.' && part !== '..' && !/[<>:"/\\|?*\x00-\x1f]/.test(part) && !/[. ]$/.test(part);
+  if (!parts.every(valid) || parts[0].toLowerCase() === '.obsidian' || !valid(base)) throw new Error('Недопустимая папка или название шаблона.');
+  return { folders: parts, filePath: [...parts, `${base}.md`].join('/') };
+}
 
 class ConsentModal extends Modal {
   constructor(app, resolve) { super(app); this.resolve = resolve; this.accepted = false; }
@@ -12,6 +33,27 @@ class ConsentModal extends Modal {
       .addButton(b => b.setButtonText('Продолжить').setCta().onClick(() => { this.accepted = true; this.close(); }));
   }
   onClose() { this.resolve(this.accepted); }
+}
+
+class TemplateModal extends Modal {
+  constructor(app, plugin, content) { super(app); this.plugin = plugin; this.content = templateContent(content); }
+  onOpen() {
+    this.titleEl.setText('Сохранить шаблон');
+    this.contentEl.createEl('p', { text: `Папка: ${this.plugin.state.settings.templateFolder}` });
+    const name = this.contentEl.createEl('input', { cls: 'pk-template-name', attr: { type: 'text', 'aria-label': 'Название шаблона' } });
+    name.value = templateTitle(this.content);
+    const body = this.contentEl.createEl('textarea', { cls: 'pk-template-preview', attr: { 'aria-label': 'Текст шаблона' } });
+    body.value = this.content;
+    new Setting(this.contentEl).addButton(b => b.setButtonText('Отмена').onClick(() => this.close()))
+      .addButton(b => b.setButtonText('Сохранить').setCta().onClick(async () => {
+        b.setDisabled(true);
+        try {
+          const file = await this.plugin.saveTemplate(name.value, body.value);
+          new Notice(`Шаблон сохранён: ${file.path}`);
+          this.close();
+        } catch (error) { new Notice(error.message); b.setDisabled(false); }
+      }));
+  }
 }
 
 class ChatView extends ItemView {
@@ -44,6 +86,12 @@ class ChatView extends ItemView {
     history.onchange = async () => { s.active = history.value; await p.persist(); this.render(); };
     const fresh = this.button(row, 'plus', 'Новый диалог', async () => { p.newChat(); await p.persist(); this.render(); });
     fresh.disabled = p.busy;
+    const skill = row.createEl('select', { attr: { 'aria-label': 'Режим' } });
+    skill.createEl('option', { value: 'chat', text: 'Обычный чат' });
+    skill.createEl('option', { value: 'template', text: 'Создать шаблон' });
+    skill.value = p.chat().mode || 'chat';
+    skill.disabled = p.busy;
+    skill.onchange = async () => { p.chat().mode = skill.value; await p.persist(); this.render(); };
     const providerRow = this.contentEl.createDiv({ cls: 'pk-toolbar' });
     const provider = providerRow.createEl('select', { attr: { 'aria-label': 'Подключение' } });
     provider.createEl('option', { value: 'local', text: 'Локально · Ollama' });
@@ -69,7 +117,7 @@ class ChatView extends ItemView {
     this.status = this.contentEl.createDiv({ cls: 'pk-status', attr: { role: 'status' } });
     this.status.setText(p.busy ? 'Агент отвечает…' : '');
     const composer = this.contentEl.createDiv({ cls: 'pk-composer' });
-    this.input = composer.createEl('textarea', { attr: { 'aria-label': 'Сообщение', placeholder: 'Сообщение…', rows: '3' } });
+    this.input = composer.createEl('textarea', { attr: { 'aria-label': 'Сообщение', placeholder: skill.value === 'template' ? 'Опишите нужный шаблон…' : 'Сообщение…', rows: '3' } });
     this.input.value = p.chat().draft || '';
     this.input.disabled = p.busy;
     this.input.oninput = () => { p.chat().draft = this.input.value; };
@@ -86,6 +134,10 @@ class ChatView extends ItemView {
     box.createEl('small', { text: message.role === 'user' ? 'Вы' : (message.model || 'Агент') });
     const body = box.createDiv({ cls: 'pk-text', text: message.content });
     if (message.error) box.createEl('small', { cls: 'pk-error', text: message.error });
+    if (message.skill === 'template' && !message.error) {
+      const save = this.button(box, 'file-plus-2', 'Сохранить шаблон', () => new TemplateModal(this.app, this.plugin, message.content).open());
+      save.disabled = Boolean(message.pending);
+    }
     return body;
   }
   async loadModels() {
@@ -111,6 +163,7 @@ class ChatView extends ItemView {
     const { provider, models } = p.state.settings, model = models[provider];
     if (!model) { await this.loadModels(); this.status.setText('Выберите модель и отправьте сообщение.'); return; }
     const chat = p.chat();
+    const mode = chat.mode || 'chat';
     p.busy = true;
     try {
       if (provider === 'chatgpt' && !chat.cloudConsent) {
@@ -125,7 +178,9 @@ class ChatView extends ItemView {
       p.controller = new AbortController();
       this.render();
       const answer = { role: 'assistant', content: '', model, provider, pending: true };
+      if (mode === 'template') answer.skill = 'template';
       const context = chat.messages.filter(m => !m.error && !m.pending).map(({ role, content }) => ({ role, content }));
+      if (mode === 'template') context[context.length - 1].content = TEMPLATE_PROMPT + text;
       chat.messages.push(answer);
       await p.persist();
       const output = this.message(answer);
@@ -140,6 +195,7 @@ class ChatView extends ItemView {
         chat.draft = text;
       } finally { delete answer.pending; }
       await p.persist();
+      if (mode === 'template' && !answer.error) new TemplateModal(this.app, p, answer.content).open();
     } catch (e) { new Notice(`Не удалось сохранить или отправить сообщение: ${e.message}`); }
     finally { p.busy = false; p.controller = null; this.render(); }
   }
@@ -153,6 +209,9 @@ function connectionSettings(container, plugin) {
   new Setting(container).setName('Путь к Codex').setDesc('Оставьте пустым для автоматического поиска.').addText(t => t.setValue(s.codexPath).onChange(async value => {
     if (plugin.busy) return;
     s.codexPath = value; plugin.codex?.close(); plugin.codex = null; await plugin.persist();
+  }));
+  new Setting(container).setName('Папка шаблонов').setDesc('Путь внутри текущего хранилища.').addText(t => t.setValue(s.templateFolder).onChange(async value => {
+    s.templateFolder = value; await plugin.persist();
   }));
   new Setting(container).setName('Аккаунт ChatGPT').setDesc('Отдельный вход для этого плагина.').addButton(b => b.setButtonText('Войти').onClick(async () => {
     b.setDisabled(true);
@@ -183,7 +242,7 @@ function connectionSettings(container, plugin) {
 
 class ConnectionModal extends Modal {
   constructor(app, plugin) { super(app); this.plugin = plugin; }
-  onOpen() { this.titleEl.setText('Подключения'); connectionSettings(this.contentEl, this.plugin); }
+  onOpen() { this.titleEl.setText('Настройки агента'); connectionSettings(this.contentEl, this.plugin); }
 }
 class SettingsTab extends PluginSettingTab {
   display() { this.containerEl.empty(); connectionSettings(this.containerEl, this.plugin); }
@@ -230,6 +289,20 @@ module.exports = class KnowledgeChat extends Plugin {
     if (provider === 'local') return new this.providers.Ollama(this.state.settings.localUrl);
     if (!this.codex) this.codex = new this.providers.Codex(this.state.settings.codexPath);
     return this.codex;
+  }
+  async saveTemplate(name, content) {
+    if (!content?.trim()) throw new Error('Шаблон пуст.');
+    const { folders, filePath } = templatePath(this.state.settings.templateFolder, name);
+    const vault = this.app.vault;
+    if (vault.getAbstractFileByPath(filePath)) throw new Error('Шаблон с таким названием уже существует.');
+    let current = '';
+    for (const folder of folders) {
+      current = current ? `${current}/${folder}` : folder;
+      const existing = vault.getAbstractFileByPath(current);
+      if (existing && !(existing instanceof TFolder)) throw new Error('Путь шаблонов занят файлом.');
+      if (!existing) await vault.createFolder(current);
+    }
+    return vault.create(filePath, content.trim() + '\n');
   }
   async openChat() {
     let leaf = this.app.workspace.getLeavesOfType(VIEW)[0];

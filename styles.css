@@ -13,3 +13,5 @@
 .pk-composer textarea { width: 100%; resize: vertical; min-height: 72px; max-height: 240px; }
 .pk-actions { justify-content: flex-end; margin-top: 6px; }
 .pk-message .pk-error { color: var(--text-error); margin-top: 8px; }
+.pk-template-preview { display: block; width: 100%; min-height: 260px; resize: vertical; margin-top: 12px; font-family: var(--font-monospace); }
+.pk-template-name { display: block; width: 100%; }
