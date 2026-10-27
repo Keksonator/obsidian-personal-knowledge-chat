@@ -1,0 +1,9 @@
+{
+  "id": "personal-knowledge-chat",
+  "name": "Личный агент",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Диалоги с локальными моделями и ChatGPT через Codex.",
+  "author": "Personal Knowledge Agent",
+  "isDesktopOnly": true
+}

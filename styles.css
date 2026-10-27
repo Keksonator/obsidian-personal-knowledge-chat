@@ -1,0 +1,15 @@
+.pk-chat { display: flex; flex-direction: column; height: 100%; gap: 10px; padding: 12px; min-width: 0; }
+.pk-header, .pk-toolbar, .pk-actions { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pk-header { justify-content: space-between; }
+.pk-toolbar { flex-wrap: wrap; }
+.pk-toolbar select { flex: 1 1 120px; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+.pk-chat button { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex: 0 0 32px; padding: 6px; }
+.pk-feed { flex: 1; min-height: 100px; overflow-y: auto; overflow-x: hidden; }
+.pk-message { padding: 12px 0; border-bottom: 1px solid var(--background-modifier-border); }
+.pk-message small { display: block; color: var(--text-muted); font-size: 12px; margin-bottom: 6px; overflow-wrap: anywhere; }
+.pk-user { padding-left: 10px; border-left: 2px solid var(--interactive-accent); }
+.pk-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; user-select: text; }
+.pk-status { font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere; min-height: 18px; }
+.pk-composer textarea { width: 100%; resize: vertical; min-height: 72px; max-height: 240px; }
+.pk-actions { justify-content: flex-end; margin-top: 6px; }
+.pk-message .pk-error { color: var(--text-error); margin-top: 8px; }
