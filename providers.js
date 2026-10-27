@@ -156,7 +156,7 @@ class Codex {
     this.rpc = rpc;
     this.cwd = cwd;
     try {
-      await rpc.call('initialize', { clientInfo: { name: 'personal_knowledge_chat', version: '0.2.0' } });
+      await rpc.call('initialize', { clientInfo: { name: 'personal_knowledge_chat', version: '0.3.0' } });
       rpc.send({ method: 'initialized', params: {} });
       return rpc;
     } catch (error) { rpc.close(); throw error; }

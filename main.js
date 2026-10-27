@@ -3,6 +3,13 @@ const path = require('node:path');
 const VIEW = 'personal-knowledge-chat';
 const DEFAULTS = { provider: 'local', localUrl: 'http://127.0.0.1:11434', codexPath: '', templateFolder: 'Шаблоны', models: { local: '', chatgpt: '' } };
 const TEMPLATE_PROMPT = 'Создай шаблон заметки Obsidian по следующему описанию. Верни только готовый Markdown, без пояснений и ограждающих блоков кода. Начни с заголовка первого уровня. Используй уместные поля и заполнители в двойных фигурных скобках. Описание: ';
+const SKILL_DRAFT_PROMPT = 'Помоги создать скил для чат-агента в Obsidian. На основе описания пользователя придумай короткое название и чёткую инструкцию для модели. Не добавляй шаги с исполнением кода, чтением заметок или отправкой данных. Ответь только в формате:\nНазвание: <название>\nИнструкция: <инструкция>\nОписание пользователя: ';
+
+function skillDraft(text, description, output) {
+  const name = text.match(/^Название:\s*(.+)$/im)?.[1]?.trim() || description.trim().split('\n')[0].slice(0, 60);
+  const instructions = text.match(/^Инструкция:\s*([\s\S]*)$/im)?.[1]?.trim() || text.trim();
+  return { name, instructions, output };
+}
 
 function templateContent(text) {
   const trimmed = text.trim();
@@ -25,10 +32,10 @@ function templatePath(folder, name) {
 }
 
 class ConsentModal extends Modal {
-  constructor(app, resolve) { super(app); this.resolve = resolve; this.accepted = false; }
+  constructor(app, resolve, skill = false) { super(app); this.resolve = resolve; this.accepted = false; this.skill = skill; }
   onOpen() {
-    this.titleEl.setText('Отправить диалог в ChatGPT?');
-    this.contentEl.createEl('p', { text: 'Текст этого диалога будет передан OpenAI. Используются лимиты вашей подписки. Заметки хранилища не отправляются.' });
+    this.titleEl.setText(this.skill ? 'Отправить описание скила в ChatGPT?' : 'Отправить диалог в ChatGPT?');
+    this.contentEl.createEl('p', { text: this.skill ? 'Описание скила будет передано OpenAI. Заметки и история чата не отправляются.' : 'Текст этого диалога будет передан OpenAI. Используются лимиты вашей подписки. Заметки хранилища не отправляются.' });
     new Setting(this.contentEl).addButton(b => b.setButtonText('Отмена').onClick(() => this.close()))
       .addButton(b => b.setButtonText('Продолжить').setCta().onClick(() => { this.accepted = true; this.close(); }));
   }
@@ -56,6 +63,96 @@ class TemplateModal extends Modal {
   }
 }
 
+class SkillEditorModal extends Modal {
+  constructor(app, plugin, manager, draft = {}) { super(app); this.plugin = plugin; this.manager = manager; this.draft = draft; }
+  onOpen() {
+    this.titleEl.setText(this.draft.id ? 'Изменить скил' : 'Новый скил');
+    this.contentEl.createEl('label', { text: 'Название' });
+    const name = this.contentEl.createEl('input', { cls: 'pk-skill-input', attr: { type: 'text', 'aria-label': 'Название скила' } });
+    name.value = this.draft.name || '';
+    this.contentEl.createEl('label', { text: 'Инструкция для агента' });
+    const instructions = this.contentEl.createEl('textarea', { cls: 'pk-skill-instructions', attr: { 'aria-label': 'Инструкция скила' } });
+    instructions.value = this.draft.instructions || '';
+    this.contentEl.createEl('label', { text: 'Результат' });
+    const output = this.contentEl.createEl('select', { cls: 'pk-skill-input', attr: { 'aria-label': 'Результат скила' } });
+    output.createEl('option', { value: 'reply', text: 'Ответ в чате' });
+    output.createEl('option', { value: 'template', text: 'Шаблон Markdown' });
+    output.value = this.draft.output || 'reply';
+    new Setting(this.contentEl).addButton(b => b.setButtonText('Отмена').onClick(() => this.close()))
+      .addButton(b => b.setButtonText('Сохранить').setCta().onClick(async () => {
+        b.setDisabled(true);
+        try {
+          await this.plugin.saveSkill({ id: this.draft.id, name: name.value, instructions: instructions.value, output: output.value });
+          this.close(); this.manager.render();
+          new Notice('Скил сохранён.');
+        } catch (error) { new Notice(error.message); b.setDisabled(false); }
+      }));
+  }
+}
+
+class DeleteSkillModal extends Modal {
+  constructor(app, plugin, manager, skill) { super(app); this.plugin = plugin; this.manager = manager; this.skill = skill; }
+  onOpen() {
+    this.titleEl.setText('Удалить скил?');
+    this.contentEl.createEl('p', { text: `Скил «${this.skill.name}» будет удалён из этого хранилища.` });
+    new Setting(this.contentEl).addButton(b => b.setButtonText('Отмена').onClick(() => this.close()))
+      .addButton(b => b.setButtonText('Удалить').setWarning().onClick(async () => {
+        await this.plugin.removeSkill(this.skill.id);
+        this.close(); this.manager.render();
+      }));
+  }
+}
+
+class SkillAIModal extends Modal {
+  constructor(app, plugin, manager) { super(app); this.plugin = plugin; this.manager = manager; }
+  onOpen() {
+    this.titleEl.setText('Создать скил с ИИ');
+    this.contentEl.createEl('label', { text: 'Что должен делать скил?' });
+    const description = this.contentEl.createEl('textarea', { cls: 'pk-skill-instructions', attr: { 'aria-label': 'Описание нового скила' } });
+    this.contentEl.createEl('label', { text: 'Результат' });
+    const output = this.contentEl.createEl('select', { cls: 'pk-skill-input', attr: { 'aria-label': 'Результат нового скила' } });
+    output.createEl('option', { value: 'reply', text: 'Ответ в чате' });
+    output.createEl('option', { value: 'template', text: 'Шаблон Markdown' });
+    output.value = 'reply';
+    new Setting(this.contentEl).addButton(b => b.setButtonText('Отмена').onClick(() => this.close()))
+      .addButton(b => b.setButtonText('Создать черновик').setCta().onClick(async () => {
+        if (!description.value.trim()) { new Notice('Опишите скил.'); return; }
+        if (this.plugin.busy) { new Notice('Дождитесь ответа в чате.'); return; }
+        const { provider, models } = this.plugin.state.settings;
+        if (!models[provider]) { new Notice('Сначала выберите модель в чате.'); return; }
+        if (provider === 'chatgpt') {
+          const accepted = await new Promise(resolve => new ConsentModal(this.app, resolve, true).open());
+          if (!accepted) return;
+        }
+        b.setDisabled(true);
+        this.controller = new AbortController();
+        try {
+          const draft = await this.plugin.draftSkill(description.value, output.value, this.controller.signal);
+          this.close();
+          new SkillEditorModal(this.app, this.plugin, this.manager, draft).open();
+        } catch (error) { if (!this.controller.signal.aborted) new Notice(error.message); }
+        finally { b.setDisabled(false); this.controller = null; }
+      }));
+  }
+  onClose() { this.controller?.abort(); }
+}
+
+class SkillManagerModal extends Modal {
+  constructor(app, plugin) { super(app); this.plugin = plugin; }
+  onOpen() { this.render(); }
+  render() {
+    this.titleEl.setText('Скилы');
+    this.contentEl.empty();
+    new Setting(this.contentEl).addButton(b => b.setButtonText('Создать вручную').onClick(() => new SkillEditorModal(this.app, this.plugin, this).open()))
+      .addButton(b => b.setButtonText('Создать с ИИ').onClick(() => new SkillAIModal(this.app, this.plugin, this).open()));
+    for (const skill of this.plugin.state.skills) {
+      new Setting(this.contentEl).setName(skill.name).setDesc(skill.output === 'template' ? 'Шаблон Markdown' : 'Ответ в чате')
+        .addButton(b => b.setIcon('pencil').setTooltip('Изменить').onClick(() => new SkillEditorModal(this.app, this.plugin, this, skill).open()))
+        .addButton(b => b.setIcon('trash-2').setTooltip('Удалить').onClick(() => new DeleteSkillModal(this.app, this.plugin, this, skill).open()));
+    }
+  }
+}
+
 class ChatView extends ItemView {
   constructor(leaf, plugin) { super(leaf); this.plugin = plugin; this.models = []; this.revision = 0; }
   getViewType() { return VIEW; }
@@ -77,7 +174,9 @@ class ChatView extends ItemView {
     this.contentEl.addClass('pk-chat');
     const header = this.contentEl.createDiv({ cls: 'pk-header' });
     header.createEl('strong', { text: 'Личный агент' });
-    this.button(header, 'settings', 'Настройки подключения', () => new ConnectionModal(this.app, p).open());
+    const headerActions = header.createDiv({ cls: 'pk-header-actions' });
+    this.button(headerActions, 'wand-sparkles', 'Управление скилами', () => new SkillManagerModal(this.app, p).open());
+    this.button(headerActions, 'settings', 'Настройки агента', () => new ConnectionModal(this.app, p).open());
     const row = this.contentEl.createDiv({ cls: 'pk-toolbar' });
     const history = row.createEl('select', { attr: { 'aria-label': 'Диалог' } });
     for (const c of s.chats) history.createEl('option', { value: c.id, text: c.title });
@@ -89,7 +188,9 @@ class ChatView extends ItemView {
     const skill = row.createEl('select', { attr: { 'aria-label': 'Режим' } });
     skill.createEl('option', { value: 'chat', text: 'Обычный чат' });
     skill.createEl('option', { value: 'template', text: 'Создать шаблон' });
-    skill.value = p.chat().mode || 'chat';
+    for (const custom of s.skills) skill.createEl('option', { value: `skill:${custom.id}`, text: custom.name });
+    const currentMode = p.chat().mode || 'chat';
+    skill.value = currentMode.startsWith('skill:') && !s.skills.some(item => `skill:${item.id}` === currentMode) ? 'chat' : currentMode;
     skill.disabled = p.busy;
     skill.onchange = async () => { p.chat().mode = skill.value; await p.persist(); this.render(); };
     const providerRow = this.contentEl.createDiv({ cls: 'pk-toolbar' });
@@ -117,7 +218,8 @@ class ChatView extends ItemView {
     this.status = this.contentEl.createDiv({ cls: 'pk-status', attr: { role: 'status' } });
     this.status.setText(p.busy ? 'Агент отвечает…' : '');
     const composer = this.contentEl.createDiv({ cls: 'pk-composer' });
-    this.input = composer.createEl('textarea', { attr: { 'aria-label': 'Сообщение', placeholder: skill.value === 'template' ? 'Опишите нужный шаблон…' : 'Сообщение…', rows: '3' } });
+    const selectedSkill = s.skills.find(item => `skill:${item.id}` === skill.value);
+    this.input = composer.createEl('textarea', { attr: { 'aria-label': 'Сообщение', placeholder: skill.value === 'template' || selectedSkill?.output === 'template' ? 'Опишите нужный шаблон…' : 'Сообщение…', rows: '3' } });
     this.input.value = p.chat().draft || '';
     this.input.disabled = p.busy;
     this.input.oninput = () => { p.chat().draft = this.input.value; };
@@ -164,6 +266,8 @@ class ChatView extends ItemView {
     if (!model) { await this.loadModels(); this.status.setText('Выберите модель и отправьте сообщение.'); return; }
     const chat = p.chat();
     const mode = chat.mode || 'chat';
+    const customSkill = p.state.skills.find(item => `skill:${item.id}` === mode);
+    const makeTemplate = mode === 'template' || customSkill?.output === 'template';
     p.busy = true;
     try {
       if (provider === 'chatgpt' && !chat.cloudConsent) {
@@ -178,9 +282,10 @@ class ChatView extends ItemView {
       p.controller = new AbortController();
       this.render();
       const answer = { role: 'assistant', content: '', model, provider, pending: true };
-      if (mode === 'template') answer.skill = 'template';
+      if (makeTemplate) answer.skill = 'template';
       const context = chat.messages.filter(m => !m.error && !m.pending).map(({ role, content }) => ({ role, content }));
-      if (mode === 'template') context[context.length - 1].content = TEMPLATE_PROMPT + text;
+      if (makeTemplate) context[context.length - 1].content = TEMPLATE_PROMPT + (customSkill ? `Инструкция скила «${customSkill.name}»: ${customSkill.instructions}\n` : '') + text;
+      else if (customSkill) context[context.length - 1].content = `Выполни скил «${customSkill.name}». Инструкция: ${customSkill.instructions}\nЗапрос пользователя: ${text}`;
       chat.messages.push(answer);
       await p.persist();
       const output = this.message(answer);
@@ -195,7 +300,7 @@ class ChatView extends ItemView {
         chat.draft = text;
       } finally { delete answer.pending; }
       await p.persist();
-      if (mode === 'template' && !answer.error) new TemplateModal(this.app, p, answer.content).open();
+      if (makeTemplate && !answer.error) new TemplateModal(this.app, p, answer.content).open();
     } catch (e) { new Notice(`Не удалось сохранить или отправить сообщение: ${e.message}`); }
     finally { p.busy = false; p.controller = null; this.render(); }
   }
@@ -213,6 +318,7 @@ function connectionSettings(container, plugin) {
   new Setting(container).setName('Папка шаблонов').setDesc('Путь внутри текущего хранилища.').addText(t => t.setValue(s.templateFolder).onChange(async value => {
     s.templateFolder = value; await plugin.persist();
   }));
+  new Setting(container).setName('Свои скилы').setDesc('Инструкции для чата и создания шаблонов.').addButton(b => b.setButtonText('Управлять').onClick(() => new SkillManagerModal(plugin.app, plugin).open()));
   new Setting(container).setName('Аккаунт ChatGPT').setDesc('Отдельный вход для этого плагина.').addButton(b => b.setButtonText('Войти').onClick(async () => {
     b.setDisabled(true);
     try {
@@ -255,6 +361,7 @@ module.exports = class KnowledgeChat extends Plugin {
     const loaded = await this.loadData();
     this.state = loaded || { chats: [], active: '', settings: DEFAULTS };
     this.state.settings = { ...DEFAULTS, ...this.state.settings, models: { ...DEFAULTS.models, ...this.state.settings?.models } };
+    this.state.skills = Array.isArray(this.state.skills) ? this.state.skills : [];
     for (const chat of this.state.chats) for (const m of chat.messages) {
       if (m.pending) { delete m.pending; m.error = 'Ответ прерван при закрытии приложения.'; }
     }
@@ -289,6 +396,41 @@ module.exports = class KnowledgeChat extends Plugin {
     if (provider === 'local') return new this.providers.Ollama(this.state.settings.localUrl);
     if (!this.codex) this.codex = new this.providers.Codex(this.state.settings.codexPath);
     return this.codex;
+  }
+  async saveSkill({ id, name, instructions, output }) {
+    name = typeof name === 'string' ? name.trim() : '';
+    instructions = typeof instructions === 'string' ? instructions.trim() : '';
+    if (!name || name.length > 60) throw new Error('Название скила должно содержать не более 60 символов.');
+    if (!instructions || instructions.length > 4000) throw new Error('Инструкция скила должна содержать не более 4000 символов.');
+    if (!['reply', 'template'].includes(output)) throw new Error('Выберите результат скила.');
+    if (this.state.skills.some(item => item.id !== id && item.name.toLocaleLowerCase() === name.toLocaleLowerCase())) throw new Error('Скил с таким названием уже есть.');
+    const existing = id ? this.state.skills.find(item => item.id === id) : null;
+    if (id && !existing) throw new Error('Скил не найден.');
+    const skill = existing || { id: require('node:crypto').randomUUID() };
+    Object.assign(skill, { name, instructions, output });
+    if (!existing) this.state.skills.push(skill);
+    await this.persist();
+    this.refreshChat();
+    return skill;
+  }
+  async removeSkill(id) {
+    this.state.skills = this.state.skills.filter(item => item.id !== id);
+    for (const chat of this.state.chats) if (chat.mode === `skill:${id}`) chat.mode = 'chat';
+    await this.persist();
+    this.refreshChat();
+  }
+  refreshChat() {
+    if (this.busy) return;
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW)) leaf.view?.render?.();
+  }
+  async draftSkill(description, output, signal) {
+    if (!description?.trim() || description.length > 2000) throw new Error('Опишите скил не более чем в 2000 символах.');
+    if (!['reply', 'template'].includes(output)) throw new Error('Выберите результат скила.');
+    const { provider, models } = this.state.settings;
+    const model = models[provider];
+    if (!model) throw new Error('Сначала выберите модель в чате.');
+    const text = await this.backend(provider).chat([{ role: 'user', content: SKILL_DRAFT_PROMPT + description.trim() }], model, signal, () => {});
+    return skillDraft(text, description, output);
   }
   async saveTemplate(name, content) {
     if (!content?.trim()) throw new Error('Шаблон пуст.');

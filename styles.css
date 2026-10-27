@@ -1,6 +1,7 @@
 .pk-chat { display: flex; flex-direction: column; height: 100%; gap: 10px; padding: 12px; min-width: 0; }
 .pk-header, .pk-toolbar, .pk-actions { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .pk-header { justify-content: space-between; }
+.pk-header-actions { display: flex; gap: 4px; flex: 0 0 auto; }
 .pk-toolbar { flex-wrap: wrap; }
 .pk-toolbar select { flex: 1 1 120px; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 .pk-chat button { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex: 0 0 32px; padding: 6px; }
@@ -15,3 +16,5 @@
 .pk-message .pk-error { color: var(--text-error); margin-top: 8px; }
 .pk-template-preview { display: block; width: 100%; min-height: 260px; resize: vertical; margin-top: 12px; font-family: var(--font-monospace); }
 .pk-template-name { display: block; width: 100%; }
+.pk-skill-input { display: block; width: 100%; margin: 4px 0 12px; }
+.pk-skill-instructions { display: block; width: 100%; min-height: 180px; resize: vertical; margin: 4px 0 12px; }
